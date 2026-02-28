@@ -1,0 +1,73 @@
+# ========================
+# Python
+# ========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ========================
+# Virtual Environments
+# ========================
+venv/
+env/
+.venv/
+.env/
+
+# ========================
+# IDE / Editor
+# ========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# ========================
+# OS Files
+# ========================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ========================
+# Dataset & Large Files
+# ========================
+data/iam/
+data/processed/
+data/custom/
+*.zip
+
+# ========================
+# Model Weights & Checkpoints
+# ========================
+weights/
+*.pth
+*.pt
+*.onnx
+*.h5
+checkpoints/
+
+# ========================
+# Training Logs & Outputs
+# ========================
+*.log
+runs/
+wandb/
+
+# ========================
+# Jupyter Notebooks
+# ========================
+.ipynb_checkpoints/
+
+# ========================
+# Misc
+# ========================
+*.csv
+!tests/dummy_labels.csv
