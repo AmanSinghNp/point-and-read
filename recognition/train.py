@@ -25,9 +25,14 @@ def train(config):
     try:
         import torch_directml
         device = torch_directml.device()
+        print("[train] Using device: DirectML (AMD GPU)")
     except Exception:
-        device = torch.device("cpu")
-    print(f"[train] Using device: {device}")
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+            print(f"[train] Using device: CUDA ({torch.cuda.get_device_name(0)})")
+        else:
+            device = torch.device("cpu")
+            print("[train] Using device: CPU")
 
     # ---- Vocabulary ----
     if os.path.exists(config["vocab_path"]):
