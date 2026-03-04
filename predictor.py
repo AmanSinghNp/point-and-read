@@ -99,7 +99,7 @@ def _resolve_inference_backend() -> str:
         auto (default), pytorch, onnx
     """
     value = os.environ.get("POINTREAD_INFERENCE_BACKEND", "auto").strip().lower()
-    if value in {"auto", "pytorch", "onnx"}:
+    if value in {"auto", "pytorch", "onnx", "int8"}:
         return value
     return "auto"
 
@@ -110,6 +110,8 @@ def _resolve_onnx_model_dir(model_id: str) -> str | None:
     candidates: list[str] = []
     if env_path:
         candidates.append(env_path)
+    # Built-in export script location
+    candidates.append(os.path.join("weights", "trocr-onnx"))
     # Default export folder from docs / scripts.
     candidates.append("onnx_trocr_model")
     # Optional per-model export folder convention.
@@ -118,6 +120,21 @@ def _resolve_onnx_model_dir(model_id: str) -> str | None:
     if os.path.isdir(model_id):
         candidates.append(os.path.join(model_id, "onnx"))
 
+    for candidate in candidates:
+        if candidate and os.path.isdir(candidate):
+            return candidate
+    return None
+
+
+def _resolve_int8_model_dir(model_id: str) -> str | None:
+    """Resolve local INT8 quantized export directory, if present."""
+    env_path = os.environ.get("POINTREAD_INT8_MODEL_DIR", "").strip()
+    candidates: list[str] = []
+    if env_path:
+        candidates.append(env_path)
+    # Built-in export script location
+    candidates.append(os.path.join("weights", "trocr-int8"))
+    
     for candidate in candidates:
         if candidate and os.path.isdir(candidate):
             return candidate
@@ -176,6 +193,7 @@ def _load_model(model_id: str | None = None):
 
         backend = _resolve_inference_backend()
         onnx_exc: Exception | None = None
+        int8_exc: Exception | None = None
         processor = None
         model = None
         device = None
@@ -205,6 +223,30 @@ def _load_model(model_id: str | None = None):
                             f"Details: {exc}"
                         ) from exc
 
+        if backend in {"auto", "int8"} and model is None:
+            int8_dir = _resolve_int8_model_dir(resolved_id)
+            if int8_dir is not None:
+                try:
+                    from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+                    
+                    try:
+                        processor = TrOCRProcessor.from_pretrained(int8_dir, use_fast=True)
+                    except Exception:
+                        processor = TrOCRProcessor.from_pretrained(resolved_id, use_fast=True)
+                    
+                    model = VisionEncoderDecoderModel.from_pretrained(int8_dir)
+                    device = torch.device("cpu") # INT8 quantization is explicitly for CPU
+                    model.to(device)
+                    model.eval()
+                    runtime = "int8"
+                except Exception as exc:
+                    int8_exc = exc
+                    if backend == "int8":
+                        raise RuntimeError(
+                            f"Failed to load INT8 model from '{int8_dir}'. "
+                            f"Details: {exc}"
+                        ) from exc
+
         if model is None:
             try:
                 from transformers import TrOCRProcessor, VisionEncoderDecoderModel
@@ -217,6 +259,8 @@ def _load_model(model_id: str | None = None):
                 runtime = "pytorch"
             except Exception as exc:
                 details = f"Details: {exc}"
+                if int8_exc is not None:
+                    details += f"\nINT8 attempt failed first: {int8_exc}"
                 if onnx_exc is not None:
                     details += f"\nONNX attempt failed first: {onnx_exc}"
                 raise RuntimeError(
@@ -404,6 +448,74 @@ def predict_with_confidence(
         ) from exc
 
     return text, confidence
+
+
+def batch_predict_with_confidence(
+    images: list[Union[str, Image.Image, np.ndarray]],
+    *,
+    num_beams: int = 2,
+    max_length: int = DEFAULT_MAX_LENGTH,
+) -> list[tuple[str, float]]:
+    """Run batched TrOCR inference on a list of images.
+
+    Args:
+        images: List of file paths, PIL Images, or numpy arrays.
+        num_beams: Number of beams for beam search.
+        max_length: Maximum number of tokens to generate.
+
+    Returns:
+        A list of (recognised_text, confidence_score) tuples matching the input order.
+    """
+    if not images:
+        return []
+
+    processor, model, device = _load_model()
+    norm_images = [_normalise_image(img) for img in images]
+
+    try:
+        pixel_values = processor(
+            images=norm_images, return_tensors="pt",
+        ).pixel_values.to(device)
+
+        with torch.no_grad():
+            outputs = model.generate(
+                pixel_values,
+                num_beams=num_beams,
+                max_length=max_length,
+                return_dict_in_generate=True,
+                output_scores=True,
+            )
+
+        generated_ids = outputs.sequences
+        texts = processor.batch_decode(generated_ids, skip_special_tokens=True)
+
+        results = []
+        for i, text in enumerate(texts):
+            # Compute confidence
+            if hasattr(outputs, "sequences_scores") and outputs.sequences_scores is not None:
+                log_prob = outputs.sequences_scores[i].item()
+                confidence = min(1.0, max(0.0, torch.exp(torch.tensor(log_prob)).item()))
+            else:
+                if outputs.scores:
+                    # scores holds one tensor (batch_size, vocab) per step
+                    probs = torch.stack(outputs.scores, dim=0).softmax(dim=-1)
+                    token_ids = generated_ids[i, 1:]  # skip decoder_start_token
+                    token_confidences = []
+                    for t, tid in enumerate(token_ids):
+                        if t < len(probs) and tid != processor.tokenizer.pad_token_id:
+                            token_confidences.append(probs[t, i, tid].item())
+                    if token_confidences:
+                        confidence = sum(token_confidences) / len(token_confidences)
+                    else:
+                        confidence = 0.0
+                else:
+                    confidence = 0.0
+            results.append((text, confidence))
+
+        return results
+
+    except Exception as exc:
+        raise RuntimeError(f"Batch inference failed: {exc}") from exc
 
 
 def predict_page(
@@ -793,13 +905,22 @@ def predict_page(
         if len(line_crops) <= 1:
             projection_boxes = _projection_line_boxes(preprocessed_img)
             if len(projection_boxes) >= 2:
-                chunk_results = []
+                crops_prepared = []
+                squares = []
                 for bbox in projection_boxes:
                     square = _extract_crop_for_bbox(preprocessed_img, bbox)
                     prepared = _prepare_crop_image_for_trocr(square)
-                    raw_text, confidence = predict_with_confidence(
-                        prepared, num_beams=num_beams, max_length=max_length
-                    )
+                    squares.append(square)
+                    crops_prepared.append(prepared)
+
+                adaptive_beams = min(num_beams, max(_compute_num_beams(bbox[2]) for bbox in projection_boxes))
+                batch_outputs = batch_predict_with_confidence(
+                    crops_prepared, num_beams=adaptive_beams, max_length=max_length
+                )
+
+                chunk_results = []
+                for i, bbox in enumerate(projection_boxes):
+                    raw_text, confidence = batch_outputs[i]
                     corrected_text, corrected_flag = _post_process_text(raw_text)
                     chunk_results.append(
                         _build_result(
@@ -808,7 +929,7 @@ def predict_page(
                             confidence=confidence,
                             bbox=bbox,
                             spell_corrected=corrected_flag,
-                            crop=square,
+                            crop=squares[i],
                         )
                     )
                 meta = {
@@ -849,15 +970,23 @@ def predict_page(
                 meta,
             )
 
-        # Multi-line: recognise each crop
-        results = []
+        # Multi-line: recognise crops in batch
+        crops_prepared = []
+        squares = []
         for _crop, bbox in line_crops:
             square = _extract_crop_for_bbox(preprocessed_img, bbox)
             prepared = _prepare_crop_image_for_trocr(square)
-            adaptive_beams = min(num_beams, _compute_num_beams(bbox[2]))
-            raw_text, confidence = predict_with_confidence(
-                prepared, num_beams=adaptive_beams, max_length=max_length
-            )
+            squares.append(square)
+            crops_prepared.append(prepared)
+
+        adaptive_beams = min(num_beams, max(_compute_num_beams(bbox[2]) for _crop, bbox in line_crops)) if line_crops else num_beams
+        batch_outputs = batch_predict_with_confidence(
+            crops_prepared, num_beams=adaptive_beams, max_length=max_length
+        )
+
+        results = []
+        for i, (_crop, bbox) in enumerate(line_crops):
+            raw_text, confidence = batch_outputs[i]
             corrected_text, corrected_flag = _post_process_text(raw_text)
             results.append(
                 _build_result(
@@ -866,7 +995,7 @@ def predict_page(
                     confidence=confidence,
                     bbox=bbox,
                     spell_corrected=corrected_flag,
-                    crop=square,
+                    crop=squares[i],
                 )
             )
         meta = {
