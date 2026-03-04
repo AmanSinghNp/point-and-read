@@ -1,58 +1,20 @@
-# Point and Read 📖🔍
+# Point and Read
 
-A deep learning-based text recognition system using **CRNN + BiLSTM + CTC** architecture. Point your camera at any text and let the model read it for you.
+A handwriting recognition app using **TrOCR** (Transformer-based OCR). Point your webcam at handwritten text, snap a photo, and the app recognizes it and reads it aloud.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c?logo=pytorch&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
----
+## Features
 
-## 🏗️ Architecture
+- **Webcam capture** — Snap handwritten notes with built-in blur and motion gates
+- **TrOCR recognition** — Microsoft's Vision Transformer + decoder for handwriting
+- **Multi-line detection** — OpenCV morphological line/word detection
+- **TTS** — Read aloud with adjustable speed
+- **Clipboard** — Copy recognized text with one click
 
-The recognition pipeline is built on a **CRNN** (Convolutional Recurrent Neural Network) with:
-
-- **CNN Backbone** — ResNet-34 (pretrained on ImageNet), modified for single-channel grayscale input
-- **Sequence Modelling** — 2-layer Bidirectional LSTM (hidden size 256)
-- **Output Layer** — Fully connected projection with CTC (Connectionist Temporal Classification) decoding
-
-```
-Input Image (1×64×W) → ResNet-34 → AdaptivePool → BiLSTM → FC → CTC Decode → Text
-```
-
-## 📂 Project Structure
-
-```
-point-and-read/
-├── recognition/          # Core recognition module
-│   ├── model.py          #   CRNN model definition
-│   ├── dataset.py        #   Dataset & data loading
-│   ├── train.py          #   Training loop
-│   ├── evaluate.py       #   Evaluation metrics (CER, WER)
-│   ├── inference.py      #   Single-image inference
-│   └── vocab.py          #   Vocabulary / character set
-├── preprocessing/        # Image preprocessing & cleaning
-│   └── clean.py          #   Binarization, deskew, noise removal
-├── detection/            # Text detection (WIP)
-│   ├── annotate/         #   Annotation tools
-│   └── train/            #   Detection model training
-├── scripts/              # Utility scripts
-│   ├── verify_iam_structure.py
-│   └── verify_preprocessing.py
-├── tests/                # Smoke tests & test fixtures
-├── parse_iam.py          # IAM dataset parser
-├── requirements.txt      # Python dependencies
-└── README.md
-```
-
-## 🚀 Getting Started
-
-### Prerequisites
-
-- Python 3.10+
-- CUDA-capable GPU (recommended) or AMD GPU with DirectML
-
-### Installation
+## Installation
 
 ```bash
 # Clone the repository
@@ -61,90 +23,87 @@ cd point-and-read
 
 # Create a virtual environment
 python -m venv venv
-source venv/bin/activate    # Linux/macOS
-venv\Scripts\activate       # Windows
+# Windows:
+venv\Scripts\activate
+# Linux/macOS:
+# source venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
 ```
 
-### Dataset Setup
-
-This project uses the [IAM Handwriting Database](https://fki.tic.heia-fr.ch/databases/iam-handwriting-database). The dataset is **not included** in this repository due to its size.
-
-1. Download the IAM dataset and place it in `data/iam/`
-2. Run the parser to prepare the data:
+## Run
 
 ```bash
-python parse_iam.py
+python main.py
 ```
 
-3. Verify the dataset structure:
+The GUI opens with an input panel (drag-and-drop, file picker, or webcam capture) and an output panel (recognized text, TTS, copy).
+
+## Model Options
+
+| Model  | Size   | Speed   | Accuracy |
+|--------|--------|---------|----------|
+| Small  | ~240MB | Fastest | Good     |
+| Base   | ~900MB | Medium  | Better   |
+| Large  | ~1.7GB | Slowest | Best     |
+
+Select from the dropdown in the header. **Small** is the default for webcam; use **Base** or **Large** for higher accuracy on difficult handwriting.
+
+Models are downloaded from HuggingFace on first run and cached locally.
+
+## Project Structure
+
+```
+point-and-read/
+├── main.py              # Entry point
+├── predictor.py         # TrOCR inference wrapper
+├── trocr/               # Model config and paths
+├── preprocessing/       # Border strip, deskew, CLAHE, binarization
+│   └── clean.py
+├── detection/           # Line/word detection with OpenCV
+│   └── line_detector.py
+├── gui/                 # PyQt6 interface
+│   ├── main_window.py
+│   ├── input_panel.py   # Image input, webcam, snap
+│   └── output_panel.py  # Text, TTS, clipboard
+├── tests/               # Predictor and pipeline tests
+│   ├── test_predictor.py
+│   ├── test_webcam_pipeline.py
+│   └── fixtures/        # Test images
+└── requirements.txt
+```
+
+## Testing
 
 ```bash
-python scripts/verify_iam_structure.py
+python tests/test_predictor.py
+python tests/test_webcam_pipeline.py
 ```
 
-### Training
+Add handwritten photos to `tests/fixtures/webcam/` for regression tests. See `tests/fixtures/README.md` for the manifest format.
 
-```bash
-python -m recognition.train
-```
+## Pipeline Overview
 
-### Inference
+1. **Frame capture** — Blur gate and motion stability before snap
+2. **Preprocessing** — Strip dark borders (e.g. DroidCam), perspective correction, CLAHE, deskew, binarization
+3. **Detection** — Morphological line/word detection
+4. **Crop prep** — Invert if needed, pad to square, resize to 384×384
+5. **TrOCR** — Beam search decoding
+6. **Retry** — If confidence &lt; 40%, retry with adaptive binarization or raw grayscale
 
-```bash
-python -m recognition.inference --image path/to/image.png
-```
+## Requirements
 
-### Evaluation
+- Python 3.10+
+- CUDA (optional) for faster inference
+- Webcam for live capture
 
-```bash
-python -m recognition.evaluate
-```
+## License
 
-## 🧪 Testing
+MIT License — see [LICENSE](LICENSE) for details.
 
-Run smoke tests to verify the pipeline:
+## Acknowledgements
 
-```bash
-python -m tests.smoke_test
-```
-
-## 📊 Metrics
-
-| Metric | Description |
-|--------|-------------|
-| **CER** | Character Error Rate |
-| **WER** | Word Error Rate |
-
-## 🗺️ Roadmap
-
-- [x] CRNN + BiLSTM + CTC recognition model
-- [x] IAM dataset parsing & preprocessing
-- [x] Training pipeline with CTC loss
-- [x] Evaluation with CER/WER metrics
-- [ ] Text detection module (EAST / CRAFT)
-- [ ] End-to-end pipeline: detect → crop → recognise
-- [ ] Real-time camera inference
-- [ ] Web / mobile demo app
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## 📄 License
-
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgements
-
-- [IAM Handwriting Database](https://fki.tic.heia-fr.ch/databases/iam-handwriting-database)
-- [PyTorch](https://pytorch.org/)
-- Inspired by the CRNN paper: *An End-to-End Trainable Neural Network for Image-based Sequence Recognition* (Shi et al., 2015)
+- [Microsoft TrOCR](https://huggingface.co/microsoft/trocr-base-handwritten)
+- [PyTorch](https://pytorch.org/) and [HuggingFace Transformers](https://huggingface.co/transformers/)
+- [PyQt6](https://www.riverbankcomputing.com/software/pyqt/) for the GUI

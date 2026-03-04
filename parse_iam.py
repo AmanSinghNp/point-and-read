@@ -19,7 +19,8 @@ import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
-from recognition.vocab import Vocabulary
+# NOTE: Vocabulary building removed — TrOCR uses its own tokenizer.
+# This script now only produces CSV files (image_path, transcription).
 
 
 def line_id_to_image_path(iam_root: str, line_id: str) -> str:
@@ -130,13 +131,7 @@ def main():
             w.writerows(subset)
         print(f"[parse_iam] Wrote {path} ({len(subset)} rows)")
 
-    # Build vocab from train transcriptions only (no val/test leakage)
-    train_texts = [row[1] for row in train_rows]
-    vocab = Vocabulary.build_from_texts(train_texts)
-    vocab_path = os.path.join(out_dir, "vocab.json")
-    vocab.save(vocab_path)
-    print(f"[parse_iam] Built vocabulary ({vocab.num_classes} chars) -> {vocab_path}")
-    print("[parse_iam] Done. train.py can use data/processed/ as-is.")
+    print("[parse_iam] Done. CSVs can be used for TrOCR fine-tuning.")
 
 
 if __name__ == "__main__":
