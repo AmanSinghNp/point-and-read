@@ -1,0 +1,58 @@
+# Protected words for OCR spell checking.
+# Words listed here will NOT be "corrected" by SymSpell.
+# Add domain-specific terms, acronyms, proper nouns, and technical jargon.
+
+# -- ML / AI frameworks --
+PyTorch
+TensorFlow
+TrOCR
+ONNX
+CUDA
+numpy
+OpenCV
+YOLO
+SymSpell
+HuggingFace
+CLAHE
+
+# -- Python / Qt --
+PyQt6
+PyQt5
+pyttsx3
+asyncio
+dataclass
+pytest
+
+# -- Common acronyms --
+OCR
+API
+GPU
+CPU
+RAM
+SSD
+USB
+PDF
+URL
+HTML
+CSS
+JSON
+YAML
+XML
+HTTP
+HTTPS
+SSH
+SQL
+AWS
+GCP
+CLI
+IDE
+SDK
+
+# -- Education --
+GPA
+PhD
+BSc
+MSc
+UNSW
+UTS
+ATAR

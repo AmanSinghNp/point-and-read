@@ -473,6 +473,16 @@ def preprocess_for_trocr(
     if image is None or image.size == 0:
         raise ValueError("Empty or invalid image array")
 
+    # Cap resolution early — every downstream step pays the cost of large images.
+    MAX_DIM = 2048
+    h, w = image.shape[:2]
+    if max(h, w) > MAX_DIM:
+        scale = MAX_DIM / max(h, w)
+        image = cv2.resize(
+            image, (int(w * scale), int(h * scale)),
+            interpolation=cv2.INTER_AREA,
+        )
+
     # Strip black borders first (e.g. DroidCam) — before any other processing
     image = strip_dark_borders(image)
 

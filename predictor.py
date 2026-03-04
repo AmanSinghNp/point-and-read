@@ -37,6 +37,7 @@ from preprocessing.clean import (
     align_text_axis_minarearect,
 )
 from nlp.spell_check import OCRCorrector
+from models.ocr_result import LineResult, PageResult
 
 # ---------------------------------------------------------------------------
 # Module-level cache (populated once on first predict() call)
@@ -72,6 +73,17 @@ def _get_spell_checker() -> OCRCorrector | None:
         _spell_checker_init_failed = True
         return None
 
+
+def _compute_num_beams(line_image_width: int) -> int:
+    """Choose beam count based on line crop width.
+
+    Short lines have fewer tokens, so a large beam width wastes compute.
+    """
+    if line_image_width < 150:
+        return 1   # Single word / very short
+    elif line_image_width < 300:
+        return 2
+    return 4       # Full sentence lines
 
 def _resolve_device() -> torch.device:
     """Detect the best available device (CUDA > CPU)."""
@@ -317,7 +329,7 @@ def predict(
         results = predict_page(
             image_input, num_beams=num_beams, max_length=max_length
         )
-        return "\n".join(r["text"] for r in results)
+        return "\n".join(r.text for r in results)
 
     text, _ = predict_with_confidence(
         image_input, num_beams=num_beams, max_length=max_length
@@ -409,7 +421,8 @@ def predict_page(
     include_crops: bool = False,
     auto_orient: bool = True,
     return_preprocessed: bool = False,
-) -> list[dict] | tuple[list[dict], np.ndarray, dict]:
+    return_dto: bool = False,
+) -> list[dict] | tuple[list[dict], np.ndarray, dict] | PageResult:
     """Detect text lines in an image and recognize each one.
 
     Preprocesses (deskew, denoise, Otsu) then uses OpenCV morphological line
@@ -496,11 +509,16 @@ def predict_page(
     spell_check_available = spell_checker is not None
 
     def _maybe_return(
-        results: list, preprocessed_img: np.ndarray, metadata: dict
-    ) -> list | tuple:
+        results: list[LineResult], preprocessed_img: np.ndarray, metadata: dict
+    ) -> list[dict] | tuple | PageResult:
+        if return_dto:
+            for i, r in enumerate(results):
+                r.line_index = i
+            return PageResult(lines=results)
+        result_dicts = [r.to_dict() for r in results]
         if return_preprocessed:
-            return (results, preprocessed_img, metadata)
-        return results
+            return (result_dicts, preprocessed_img, metadata)
+        return result_dicts
 
     def _detect_main_crops(
         img: np.ndarray,
@@ -567,17 +585,15 @@ def predict_page(
         bbox: tuple[int, int, int, int] | None,
         spell_corrected: bool,
         crop: np.ndarray | None = None,
-    ) -> dict:
-        result = {
-            "text": text,
-            "raw_text": raw_text,
-            "confidence": confidence,
-            "bbox": bbox,
-            "spell_corrected": spell_corrected,
-        }
-        if include_crops and crop is not None and isinstance(crop, np.ndarray) and crop.size > 0:
-            result["crop"] = crop
-        return result
+    ) -> LineResult:
+        return LineResult(
+            text=text,
+            raw_text=raw_text,
+            confidence=confidence,
+            bbox=bbox,
+            spell_corrected=spell_corrected,
+            crop=crop if include_crops else None,
+        )
 
     def _prepare_whole_image_for_trocr(img: np.ndarray) -> np.ndarray:
         """Prepare whole image as single crop for fallback/probing."""
@@ -800,7 +816,7 @@ def predict_page(
                     "num_regions": len(projection_boxes),
                     "projection_chunking_used": True,
                     "detector_backend": "projection",
-                    "spell_corrected": any(r.get("spell_corrected") for r in chunk_results),
+                    "spell_corrected": any(r.spell_corrected for r in chunk_results),
                 }
                 return (chunk_results, preprocessed_img, meta)
 
@@ -838,8 +854,9 @@ def predict_page(
         for _crop, bbox in line_crops:
             square = _extract_crop_for_bbox(preprocessed_img, bbox)
             prepared = _prepare_crop_image_for_trocr(square)
+            adaptive_beams = min(num_beams, _compute_num_beams(bbox[2]))
             raw_text, confidence = predict_with_confidence(
-                prepared, num_beams=num_beams, max_length=max_length
+                prepared, num_beams=adaptive_beams, max_length=max_length
             )
             corrected_text, corrected_flag = _post_process_text(raw_text)
             results.append(
@@ -857,7 +874,7 @@ def predict_page(
             "num_regions": num_regions,
             "projection_chunking_used": False,
             "detector_backend": detector_backend,
-            "spell_corrected": any(r.get("spell_corrected") for r in results),
+            "spell_corrected": any(r.spell_corrected for r in results),
         }
         return (results, preprocessed_img, meta)
 
@@ -913,7 +930,7 @@ def predict_page(
         if orientation_decision is not None:
             run_metadata = {**run_metadata, **orientation_decision}
 
-        avg_conf = sum(r["confidence"] for r in run_results) / len(run_results) if run_results else 0.0
+        avg_conf = sum(r.confidence for r in run_results) / len(run_results) if run_results else 0.0
 
         if avg_conf > best_avg_conf:
             best_avg_conf = avg_conf
