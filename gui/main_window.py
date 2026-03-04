@@ -10,7 +10,7 @@ import sys
 
 import numpy as np
 
-from PyQt6.QtCore import Qt, QThread, QObject, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt, QThread, QObject, pyqtSignal, pyqtSlot, QRunnable, QThreadPool
 from PyQt6.QtGui import QFont, QIcon, QAction
 from PyQt6.QtWidgets import (
     QMainWindow, QSplitter, QWidget, QVBoxLayout, QHBoxLayout,
@@ -48,6 +48,7 @@ class InferenceWorker(QObject):
         self.from_webcam = from_webcam
         self.detector_backend = detector_backend
         self.apply_spell_check = apply_spell_check
+        self.signals = WorkerSignals()
 
     @pyqtSlot()
     def run(self):
@@ -70,28 +71,26 @@ class InferenceWorker(QObject):
                 )
                 metadata["blur_score"] = _blur_score(self.image)
                 metadata["brightness"] = float(np.mean(gray))
-            self.result_ready.emit(results, preprocessed, metadata)
+            self.signals.result_ready.emit(results, preprocessed, metadata)
         except Exception as e:
-            self.error_occurred.emit(str(e))
+            self.signals.error_occurred.emit(str(e))
 
 
 # â”€â”€ Model Loader Worker (runs in QThread) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-class ModelLoaderWorker(QObject):
+class ModelLoaderRunnable(QRunnable):
     """Loads a TrOCR model in a background thread to avoid UI freeze."""
-    finished = pyqtSignal()
-    error_occurred = pyqtSignal(str)
-
     def __init__(self, model_key: str):
         super().__init__()
         self.model_key = model_key
+        self.signals = WorkerSignals()
 
     @pyqtSlot()
     def run(self):
         try:
             set_model(self.model_key)
-            self.finished.emit()
+            self.signals.finished.emit()
         except Exception as e:
-            self.error_occurred.emit(str(e))
+            self.signals.error_occurred.emit(str(e))
 
 
 # â”€â”€ Theme Stylesheet â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -199,8 +198,9 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1100, 650)
         self.resize(1280, 720)
 
-        self._inference_thread: QThread | None = None
-        self._model_loader_thread: QThread | None = None
+        self.thread_pool = QThreadPool.globalInstance()
+        self.thread_pool.setMaxThreadCount(2)
+        
         self._current_image: np.ndarray | None = None
         self._image_from_webcam: bool = False
         self._detector_backend: str = "auto"
@@ -341,15 +341,10 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Loading {self.model_combo.currentText().strip()}...")
 
         # Load in background thread
-        self._model_loader_thread = QThread()
-        self._model_loader_worker = ModelLoaderWorker(model_key)
-        self._model_loader_worker.moveToThread(self._model_loader_thread)
-        self._model_loader_thread.started.connect(self._model_loader_worker.run)
-        self._model_loader_worker.finished.connect(self._on_model_loaded)
-        self._model_loader_worker.error_occurred.connect(self._on_model_load_error)
-        self._model_loader_worker.finished.connect(self._model_loader_thread.quit)
-        self._model_loader_worker.error_occurred.connect(self._model_loader_thread.quit)
-        self._model_loader_thread.start()
+        worker = ModelLoaderRunnable(model_key)
+        worker.signals.finished.connect(self._on_model_loaded)
+        worker.signals.error_occurred.connect(self._on_model_load_error)
+        self.thread_pool.start(worker)
 
     def _on_detector_changed(self, index: int):
         """Switch detector backend used by predict_page()."""
@@ -370,15 +365,10 @@ class MainWindow(QMainWindow):
         # Prevent overlapping model loads while warmup is running.
         self.model_combo.setEnabled(False)
         self.btn_recognize.setEnabled(False)
-        self._model_loader_thread = QThread()
-        self._model_loader_worker = ModelLoaderWorker(default_key)
-        self._model_loader_worker.moveToThread(self._model_loader_thread)
-        self._model_loader_thread.started.connect(self._model_loader_worker.run)
-        self._model_loader_worker.finished.connect(self._on_warmup_complete)
-        self._model_loader_worker.error_occurred.connect(self._on_warmup_error)
-        self._model_loader_worker.finished.connect(self._model_loader_thread.quit)
-        self._model_loader_worker.error_occurred.connect(self._model_loader_thread.quit)
-        self._model_loader_thread.start()
+        worker = ModelLoaderRunnable(default_key)
+        worker.signals.finished.connect(self._on_warmup_complete)
+        worker.signals.error_occurred.connect(self._on_warmup_error)
+        self.thread_pool.start(worker)
         self.status_bar.showMessage("Loading model in background...")
 
     @pyqtSlot()
@@ -435,8 +425,6 @@ class MainWindow(QMainWindow):
         """Shared logic: show spinner, launch InferenceWorker in background thread."""
         if self._current_image is None:
             return
-        if self._inference_thread is not None and self._inference_thread.isRunning():
-            return  # Already running
 
         if not self._check_brightness(self._current_image):
             mean_val = float(np.mean(
@@ -459,20 +447,15 @@ class MainWindow(QMainWindow):
         self.btn_recognize.setEnabled(False)
         self.status_bar.showMessage("Running inference...")
 
-        self._inference_thread = QThread()
-        self._worker = InferenceWorker(
+        worker = InferenceRunnable(
             self._current_image,
             from_webcam=self._image_from_webcam,
             detector_backend=self._detector_backend,
             apply_spell_check=self.input_panel.is_spell_check_enabled(),
         )
-        self._worker.moveToThread(self._inference_thread)
-        self._inference_thread.started.connect(self._worker.run)
-        self._worker.result_ready.connect(self._on_inference_done)
-        self._worker.error_occurred.connect(self._on_inference_error)
-        self._worker.result_ready.connect(self._inference_thread.quit)
-        self._worker.error_occurred.connect(self._inference_thread.quit)
-        self._inference_thread.start()
+        worker.signals.result_ready.connect(self._on_inference_done)
+        worker.signals.error_occurred.connect(self._on_inference_error)
+        self.thread_pool.start(worker)
 
     @pyqtSlot(list, object, object)
     def _on_inference_done(
@@ -574,11 +557,5 @@ class MainWindow(QMainWindow):
     # â”€â”€ Cleanup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def closeEvent(self, event):
         self.input_panel.close()
-        if self._inference_thread and self._inference_thread.isRunning():
-            self._inference_thread.quit()
-            self._inference_thread.wait(3000)
-        if self._model_loader_thread and self._model_loader_thread.isRunning():
-            self._model_loader_thread.quit()
-            self._model_loader_thread.wait(3000)
         super().closeEvent(event)
 

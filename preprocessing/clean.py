@@ -5,6 +5,21 @@ import torchvision.transforms as T
 import math
 from PIL import Image as PILImage, ImageOps
 
+from dataclasses import dataclass
+from typing import Literal
+
+@dataclass
+class PreprocessConfig:
+    strip_borders: bool = True
+    correct_perspective: bool = True
+    remove_shadows: bool = True
+    apply_clahe: bool = True
+    deskew: bool = True
+    gaussian_blur: bool = True
+    binarization_mode: Literal["otsu", "adaptive", "raw"] = "otsu"
+    max_dimension: int = 2048
+    remove_ruled_lines: bool = False
+
 
 def apply_exif_orientation(image_input) -> np.ndarray:
     """Apply EXIF orientation correction to an image.
@@ -445,12 +460,7 @@ def correct_perspective(image: np.ndarray) -> np.ndarray:
 
 def preprocess_for_trocr(
     image: np.ndarray,
-    *,
-    apply_perspective: bool = True,
-    apply_shadow_removal: bool = True,
-    apply_deskew: bool = True,
-    apply_clahe: bool = True,
-    binarization_mode: str = "otsu",
+    config: PreprocessConfig | None = None,
 ) -> np.ndarray:
     """
     Preprocess image for TrOCR: perspective correction, deskew, denoise, binarize.
@@ -460,12 +470,7 @@ def preprocess_for_trocr(
 
     Args:
         image: BGR or grayscale numpy array.
-        apply_perspective: If True, try to flatten document perspective first.
-        apply_shadow_removal: If True, normalize uneven illumination/shadows.
-        apply_deskew: If True, run Hough-line deskew (critical for webcam shots).
-        apply_clahe: If True, apply CLAHE for contrast normalization before Otsu.
-        binarization_mode: "otsu" (default), "adaptive" (blockSize=15, C=5),
-            or "raw" (no binarization, pass CLAHE-enhanced grayscale).
+        config: Optional PreprocessConfig determining active stages.
 
     Returns:
         Preprocessed grayscale uint8 array (H, W).
@@ -473,21 +478,25 @@ def preprocess_for_trocr(
     if image is None or image.size == 0:
         raise ValueError("Empty or invalid image array")
 
+    if config is None:
+        config = PreprocessConfig()
+
     # Cap resolution early — every downstream step pays the cost of large images.
-    MAX_DIM = 2048
-    h, w = image.shape[:2]
-    if max(h, w) > MAX_DIM:
-        scale = MAX_DIM / max(h, w)
-        image = cv2.resize(
-            image, (int(w * scale), int(h * scale)),
-            interpolation=cv2.INTER_AREA,
-        )
+    if config.max_dimension:
+        h, w = image.shape[:2]
+        if max(h, w) > config.max_dimension:
+            scale = config.max_dimension / max(h, w)
+            image = cv2.resize(
+                image, (int(w * scale), int(h * scale)),
+                interpolation=cv2.INTER_AREA,
+            )
 
     # Strip black borders first (e.g. DroidCam) — before any other processing
-    image = strip_dark_borders(image)
+    if config.strip_borders:
+        image = strip_dark_borders(image)
 
     # Perspective correction (then deskew)
-    if apply_perspective:
+    if config.correct_perspective:
         image = correct_perspective(image)
 
     if len(image.shape) == 3:
@@ -496,26 +505,33 @@ def preprocess_for_trocr(
         gray = image.copy()
 
     # Shadow/illumination correction before thresholding.
-    if apply_shadow_removal:
+    if config.remove_shadows:
         gray = remove_shadows(gray)
 
+    # Remove ruled notebook lines if requested
+    if config.remove_ruled_lines:
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
+        detected_lines = cv2.morphologyEx(gray, cv2.MORPH_OPEN, horizontal_kernel, iterations=2)
+        gray = cv2.subtract(gray, detected_lines)
+
     # Optional contrast enhancement before binarization
-    if apply_clahe:
+    if config.apply_clahe:
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         gray = clahe.apply(gray)
 
     # Deskew (critical for angled paper)
-    if apply_deskew:
+    if config.deskew:
         prep = Preprocessor(apply_deskew=True, is_training=False)
         gray = prep.deskew(gray)
 
     # Denoise
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    if config.gaussian_blur:
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
 
     # Binarization
-    if binarization_mode == "otsu":
+    if config.binarization_mode == "otsu":
         _, output = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    elif binarization_mode == "adaptive":
+    elif config.binarization_mode == "adaptive":
         output = cv2.adaptiveThreshold(
             gray, 255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -523,7 +539,7 @@ def preprocess_for_trocr(
             blockSize=15,
             C=5,
         )
-    elif binarization_mode == "raw":
+    elif config.binarization_mode == "raw":
         output = gray
     else:
         raise ValueError(

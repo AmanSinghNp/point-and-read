@@ -35,6 +35,7 @@ from preprocessing.clean import (
     preprocess_for_trocr,
     apply_exif_orientation,
     align_text_axis_minarearect,
+    PreprocessConfig,
 )
 from nlp.spell_check import OCRCorrector
 from models.ocr_result import LineResult, PageResult
@@ -984,6 +985,23 @@ def predict_page(
             crops_prepared, num_beams=adaptive_beams, max_length=max_length
         )
 
+        # 3.3 Confidence-based retry strategy for poor initial reads
+        retry_indices = []
+        retry_prepared = []
+        for i, (text, conf) in enumerate(batch_outputs):
+            if conf < 0.40:
+                retry_indices.append(i)
+                inverted = cv2.bitwise_not(squares[i])
+                retry_prepared.append(_prepare_crop_image_for_trocr(inverted))
+                
+        if retry_prepared:
+            retry_outputs = batch_predict_with_confidence(
+                retry_prepared, num_beams=adaptive_beams, max_length=max_length
+            )
+            for retry_idx, (r_text, r_conf) in zip(retry_indices, retry_outputs):
+                if r_conf > batch_outputs[retry_idx][1]:
+                    batch_outputs[retry_idx] = (r_text, r_conf)
+
         results = []
         for i, (_crop, bbox) in enumerate(line_crops):
             raw_text, confidence = batch_outputs[i]
@@ -1034,7 +1052,8 @@ def predict_page(
         if binarization_mode == "otsu" and _preprocess_cache is not None and _preprocess_cache[0] == img_id:
             preprocessed = _preprocess_cache[1]
         else:
-            preprocessed = preprocess_for_trocr(image_np, binarization_mode=binarization_mode)
+            pc = PreprocessConfig(binarization_mode=binarization_mode)
+            preprocessed = preprocess_for_trocr(image_np, config=pc)
             if binarization_mode == "otsu":
                 _preprocess_cache = (img_id, preprocessed)
 
